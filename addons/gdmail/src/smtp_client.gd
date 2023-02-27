@@ -1,12 +1,14 @@
 extends Node
 class_name SMTPClient
 
-signal error(error: Error)
+signal error(error: Dictionary)
 signal email_sent()
+signal result(content: Dictionary)
 
 enum SessionStatus {
     NONE,
     SERVER_ERROR,
+    COMMAND_NOT_SENT,
     COMMAND_REFUSED,
     HELO,
     HELO_ACK,
@@ -55,8 +57,12 @@ func _ready():
 func send_email(email: Email) -> void:
     self.email = email
     
-    if tcp_client.connect_to_host(host, port) != OK:
+    var err: Error = tcp_client.connect_to_host(host, port)
+    if err != OK:
         printerr("Could not connect!")
+        var error_body: Dictionary = { message = "Error connecting to host.", code = err }
+        error.emit(error_body)
+        result.emit({ success = false, error = error_body })
         set_process(false)
     
     session_status = SessionStatus.HELO
@@ -71,10 +77,7 @@ func poll_client() -> Error:
 
 func _process(delta: float) -> void:
     if session_status == SessionStatus.SERVER_ERROR:
-        printerr("Something went wrong.")
-        session_status = SessionStatus.NONE
-    
-    
+        close_connection()
     
     if poll_client() == OK:
         var connected: bool = (tcp_client.get_status() == StreamPeerTCP.STATUS_CONNECTED if not tls_started else tls_client.get_status() == StreamPeerTLS.STATUS_CONNECTED)
@@ -89,14 +92,17 @@ func _process(delta: float) -> void:
                     "220":
                         match session_status:
                             SessionStatus.HELO:
-                                if write_command("EHLO smtp.godotengine.org") != OK:
-                                    session_status = SessionStatus.SERVER_ERROR
+                                if not write_command("EHLO smtp.godotengine.org"):
                                     return
                                 session_status = SessionStatus.EHLO
                             
                             SessionStatus.STARTTLS:
-                                if tls_client.connect_to_stream(tcp_client, host, tls_options) != OK:
+                                var err: Error = tls_client.connect_to_stream(tcp_client, host, tls_options)
+                                if err != OK:
                                     session_status = SessionStatus.SERVER_ERROR
+                                    var error_body: Dictionary = { message = "Error connecting to TLS Stream.", code = err }
+                                    error.emit(error_body)
+                                    result.emit({ success = false, error = error_body })
                                     return
                                 tls_started = true
                                 
@@ -104,22 +110,19 @@ func _process(delta: float) -> void:
                         match session_status:
                             SessionStatus.EHLO:
                                 if tls:
-                                    if write_command("STARTTLS") != OK:
-                                        session_status = SessionStatus.SERVER_ERROR
+                                    if not write_command("STARTTLS"):
                                         return
                                     session_status = SessionStatus.STARTTLS
-                                    return
-                                session_status = SessionStatus.EHLO_ACK
+                                else:
+                                    session_status = SessionStatus.EHLO_ACK
                             
                             SessionStatus.STARTTLS:
-                                    if write_command("AUTH LOGIN") != OK:
-                                        session_status = SessionStatus.SERVER_ERROR
+                                    if not write_command("AUTH LOGIN"):
                                         return
                                     session_status = SessionStatus.AUTH_LOGIN
                             
                             SessionStatus.MAIL_FROM:
-                                if write_command("RCPT TO:<%s>" % email.to[to_index].address) != OK:
-                                    session_status = SessionStatus.SERVER_ERROR
+                                if not write_command("RCPT TO:<%s>" % email.to[to_index].address):
                                     return
                                 session_status = SessionStatus.RCPT_TO
                                 to_index += 1
@@ -129,13 +132,12 @@ func _process(delta: float) -> void:
                                     session_status = SessionStatus.MAIL_FROM
                                     return
                                 
-                                if write_command("DATA") != OK:
-                                    session_status = SessionStatus.SERVER_ERROR
+                                if not write_command("DATA"):
                                     return
                                 session_status = SessionStatus.DATA
                             
                             SessionStatus.DATA_ACK:
-                                if write_command("QUIT") != OK:
+                                if not write_command("QUIT"):
                                     return
                                 session_status = SessionStatus.QUIT
                     "221":
@@ -143,6 +145,7 @@ func _process(delta: float) -> void:
                             SessionStatus.QUIT:
                                 close_connection()
                                 email_sent.emit()
+                                result.emit({ success = true })
                     "235": # Authentication Succeeded
                         match session_status:
                             SessionStatus.PASSWORD:
@@ -151,15 +154,13 @@ func _process(delta: float) -> void:
                         match session_status:
                             SessionStatus.AUTH_LOGIN:
                                 if msg.begins_with("334 VXNlcm5hbWU6"):
-                                    if write_command(authentication.encode_username()) != OK:
-                                        session_status = SessionStatus.SERVER_ERROR
+                                    if not write_command(authentication.encode_username()):
                                         return
                                     session_status = SessionStatus.USERNAME
                             
                             SessionStatus.USERNAME:
                                 if msg.begins_with("334 UGFzc3dvcmQ6"):
-                                    if write_command(authentication.encode_password()) != OK:
-                                        session_status = SessionStatus.SERVER_ERROR
+                                    if not write_command(authentication.encode_password()):
                                         return
                                     session_status = SessionStatus.PASSWORD
                     "354":
@@ -174,14 +175,12 @@ func _process(delta: float) -> void:
             else:
                 if tls_started and not tls_established:
                     tls_established = true                      
-                    if write_command("EHLO smtp.godotengine.org") != OK:
-                        session_status = SessionStatus.SERVER_ERROR
+                    if not write_command("EHLO smtp.godotengine.org"):
                         return
         
         if email != null and (session_status == SessionStatus.EHLO_ACK or session_status == SessionStatus.AUTHENTICATED):
             session_status = SessionStatus.MAIL_FROM
-            if not (write_command("MAIL FROM:<%s>" % email.from.address) == OK):
-                session_status = SessionStatus.SERVER_ERROR
+            if not write_command("MAIL FROM:<%s>" % email.from.address):
                 return
         
         else:
@@ -189,8 +188,15 @@ func _process(delta: float) -> void:
     else:
         printerr("Couldn't poll!")
 
-func write_command(command: String) -> Error:
-    return (tls_client if tls_established else tcp_client).put_data((command + "\n").to_utf8_buffer())
+func write_command(command: String) -> bool:
+    var err: Error = (tls_client if tls_established else tcp_client).put_data((command + "\n").to_utf8_buffer())
+    if err != OK:
+        session_status = SessionStatus.COMMAND_NOT_SENT
+        var error_body: Dictionary = { message = "Session error on command: %s" % command, code = err }
+        error.emit(error_body)
+        result.emit({ success = false, error = error_body })
+    return (err == OK)
+        
 
 func write_data(data: String) -> Error:
     return (tls_client if tls_established else tcp_client).put_data((data + "\r\n.\r\n").to_utf8_buffer())
