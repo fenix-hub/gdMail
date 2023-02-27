@@ -25,7 +25,7 @@ func _ready():
         # List of internet addresses of recipients
         [InternetAddress.new("<recipients_mail@provider.com>")],    
         # Subject                                 
-        "Hello world!,
+        "Hello world!",
         # Body
         "Hello world! This is my first email ever from Godot. Hope you like it!"
     )
