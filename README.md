@@ -9,14 +9,14 @@ extends Control
 # Called when the node enters the scene tree for the first time.
 func _ready():
     var authentication: SMTPAuthentication = SMTPAuthentication.new(
-        "n.santilio97@gmail.com", "yavlydsalbiutbrq"
+        "<your_mail@provider.com>", "<your_password>"
     )
     var smtp_client: SMTPClient = SMTPClient.new("smtp.gmail.com", 587, true, authentication)
     add_child(smtp_client)
     
     var email: Email = Email.new(
-        InternetAddress.new("n.santilio97@gmail.com", "Nicolo from Godot Engine"),
-        [InternetAddress.new("nicolo.santilio@outlook.com")],
+        InternetAddress.new("<your_mail@provider.com>", "<a_name>"),
+        [InternetAddress.new("<recipients_mail@provider.com>")],
         "Hello world!",
         "Hello world! This is my first email ever from Godot. Hope you like it!"
     )
